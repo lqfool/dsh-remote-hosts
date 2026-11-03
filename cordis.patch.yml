@@ -1,0 +1,40 @@
+# Shipped defaults for the remote hosts bundle.
+#
+# No machine is listed here on purpose: the hosts you connect to belong to you,
+# not to this package. Configure them in your own profile layer, which replaces
+# this row's config wholesale (Cordis patches never deep-merge config):
+#
+#   # ~/.dsh/profiles/<profile>/cordis.patch.yml
+#   - id: remote-hosts
+#     name: 'dsh-remote-hosts'
+#     config:
+#       tsh: /usr/local/bin/tsh
+#       hosts:
+#         - id: dev
+#           label: Dev box
+#           target: my-teleport-host
+#           login: root
+#       sync:
+#         userRoot: /user
+#
+# The account to use — which /user/<name> directory, and the launcher generated
+# for it — is detected on connect. See README.md.
+- insert:
+    - id: remote-hosts
+      name: 'dsh-remote-hosts'
+      config:
+        hosts: []
+        sync:
+          # Where per-person directories live on the host.
+          userRoot: /user
+          profile: desktop
+          rows:
+            - agent-default-model
+            - llm-pi-ai
+          profiles:
+            - web
+            - tui
+            - headless
+        install:
+          # Installed under <account>/.local on first connect if missing.
+          version: latest

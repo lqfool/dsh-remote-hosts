@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Remote Hosts",
+    "description": "Lists remote machines and connects each one through its own DSH web GUI."
+  }
+}

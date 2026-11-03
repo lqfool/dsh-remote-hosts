@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Remote hosts">
+  <rect x="6" y="10" width="52" height="18" rx="5" fill="#1f6feb" opacity="0.14"/>
+  <rect x="6" y="10" width="52" height="18" rx="5" fill="none" stroke="#1f6feb" stroke-width="3"/>
+  <rect x="6" y="36" width="52" height="18" rx="5" fill="#1f6feb" opacity="0.14"/>
+  <rect x="6" y="36" width="52" height="18" rx="5" fill="none" stroke="#1f6feb" stroke-width="3"/>
+  <circle cx="16" cy="19" r="3.2" fill="#1f6feb"/>
+  <circle cx="16" cy="45" r="3.2" fill="#2ea043"/>
+  <path d="M27 19h21M27 45h21" stroke="#1f6feb" stroke-width="3" stroke-linecap="round" opacity="0.55"/>
+</svg>
