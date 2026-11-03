@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-hosts",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Panel of remote machines: connect one and work on it through its own DSH web GUI, as the logged-in account.",
   "license": "MIT",
   "type": "module",

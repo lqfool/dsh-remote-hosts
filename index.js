@@ -373,9 +373,36 @@ export function apply(ctx, config) {
     }
   };
 
+  /**
+   * Kill a tunnel left behind by an earlier run of this app.
+   *
+   * Quitting the app does not reap its children, so a forward started before a
+   * restart keeps the local port bound while the new process has no handle on
+   * it. The match is deliberately narrow — the exact `-L port:…` spec of this
+   * host on a tsh/ssh command line — so nothing unrelated is touched.
+   */
+  const clearStaleForward = async (host) => {
+    const spec = `-L ${host.localPort}:127.0.0.1:${host.remotePort}`;
+    const listing = await run('/bin/sh', ['-c', 'ps -axo pid=,command='], 5000);
+    for (const line of listing.stdout.split('\n')) {
+      if (!line.includes(spec)) continue;
+      if (!line.includes('tsh') && !line.includes('ssh')) continue;
+      const pid = Number(line.trim().split(/\s+/)[0]);
+      if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) continue;
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+  };
+
+  // A restart leaves the previous run's forwards alive; release those ports now
+  // rather than at the moment someone clicks connect.
+  for (const host of hostsAll()) void clearStaleForward(host);
+
   const startForward = (host, state) =>
-    new Promise((resolve, reject) => {
-      const args = [
+    new Promise((resolve, reject) => {      const args = [
         ...sshArgs(host, ['-L', `${host.localPort}:127.0.0.1:${host.remotePort}`]),
         '--',
         'sleep 86400',
@@ -395,7 +422,12 @@ export function apply(ctx, config) {
       child.once('error', (error) => fail(`cannot start ${binaryOf(host)}: ${error.message}`));
       child.once('exit', (code) => {
         if (state.forward === child) state.forward = undefined;
-        if (!settled) fail(`the SSH forward exited with ${code}`);
+        if (settled) return;
+        if (/address already in use/i.test(stderr)) {
+          fail(`local port ${host.localPort} is already in use; something else is holding it`);
+          return;
+        }
+        fail(`the SSH forward exited with ${code}`);
       });
       let stderr = '';
       child.stderr?.on('data', (chunk) => {
@@ -405,6 +437,10 @@ export function apply(ctx, config) {
       state.forward = child;
       setTimeout(() => {
         if (settled) return;
+        if (stderr.trim() && /address already in use/i.test(stderr)) {
+          fail(`local port ${host.localPort} is already in use; something else is holding it`);
+          return;
+        }
         if (stderr.trim() && /error|denied|fail/i.test(stderr)) {
           fail(stderr.trim().split('\n').slice(-2).join(' '));
           return;
@@ -525,6 +561,9 @@ export function apply(ctx, config) {
       if (!url) throw new Error('the remote DSH started but did not report a URL within the timeout');
     }
     stopForward(state);
+    // A forward left over from a previous run keeps the port bound, and the
+    // new one would exit with "address already in use" before it ever connects.
+    await clearStaleForward(host);
     await startForward(host, state);
     const local = new URL(url);
     local.protocol = 'http:';
