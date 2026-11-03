@@ -183,6 +183,35 @@ pnpm add dsh-remote-hosts
 | `install.timeoutMs` | `1800000` | 安装超时（30 分钟） |
 | `connectTimeoutMs` | `90000` | 等待远端起服务的时间 |
 
+## 自动发现机器
+
+不用把机器名写死。打开 `discover` 后，插件自己跑 `tsh ls` 拉取集群节点，新机器出现就自动进面板，下线就自动消失：
+
+```yaml
+config:
+  tsh: '/path/to/tsh'
+  hosts: []                 # 可以留空
+  discover:
+    match: 'devspace-*'     # 只发现匹配的节点；* 是通配，不含 * 时按子串匹配
+    login: root
+```
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `discover.match` | 全部 | 主机名过滤，支持 `*`，可写多个 |
+| `discover.exclude` | — | 命中就不显示 |
+| `discover.clusters` | 全部 | 按 Teleport 集群标签过滤（`huhehaote`、`zhuhai` 之类） |
+| `discover.login` | `root` | 发现出来的机器用哪个登录名 |
+| `discover.ttlMs` | `30000` | 多久重新拉一次，最少 5 秒 |
+
+行为说明：
+
+- **`hosts` 里的条目优先**。发现结果和它 target 相同的会被跳过，所以想给某台机器固定标签或端口，照旧写一条进去即可
+- `tsh ls` 失败（登录过期、代理不通）时**保留上一次的列表**，面板不会突然清空
+- 发现的主机端口同样按 id 固定，机器增减不会让已有机器的端口乱跳
+
+> 前提：`tsh ls` 要能跑通。用 Teleport 的人本来就有这个能力，不是额外依赖。
+
 ## 改主机不用重启
 
 面板每 5 秒轮询一次，服务端顺带重读 `cordis.patch.yml`：新增、删除、改顺序的主机**下一次轮询就生效**，不用重启应用。

@@ -83,10 +83,25 @@ function normalizeConfig(config) {
     }));
   const sync = c.sync ?? {};
   const install = c.install ?? {};
+  const discover = c.discover ?? {};
+  const patterns = (value) =>
+    (Array.isArray(value) ? value : typeof value === 'string' ? [value] : []).filter(
+      (item) => typeof item === 'string' && item.length > 0,
+    );
   return {
     tsh: typeof c.tsh === 'string' && c.tsh ? c.tsh : 'tsh',
     ssh: typeof c.ssh === 'string' && c.ssh ? c.ssh : 'ssh',
     hosts,
+    // Machines listed above are always shown; discovery adds the rest from
+    // `tsh ls`, so a machine that appears in the cluster shows up on its own.
+    discover: {
+      enabled: c.discover ? discover.enabled !== false : false,
+      match: patterns(discover.match),
+      exclude: patterns(discover.exclude),
+      clusters: patterns(discover.clusters),
+      login: typeof discover.login === 'string' && discover.login ? discover.login : 'root',
+      ttlMs: Number.isInteger(discover.ttlMs) && discover.ttlMs >= 5000 ? discover.ttlMs : 30000,
+    },
     connectTimeoutMs: Number.isInteger(c.connectTimeoutMs) ? c.connectTimeoutMs : 90000,
     sync: {
       // Local profile whose rows and keys are pushed to the host.
@@ -144,6 +159,10 @@ export function apply(ctx, config) {
   let settings = normalizeConfig(config);
   assignPorts(settings.hosts, config?.hosts, pinnedPorts);
   const states = new Map();
+  // Machines found by `tsh ls`; the listed ones in settings.hosts always win,
+  // so an explicit entry can pin a label, a port or a different login.
+  let discovered = [];
+  const hostsAll = () => (discovered.length === 0 ? settings.hosts : [...settings.hosts, ...discovered]);
 
   const stateOf = (host) => {
     let state = states.get(host.id);
@@ -154,7 +173,7 @@ export function apply(ctx, config) {
     return state;
   };
 
-  for (const host of settings.hosts) stateOf(host);
+  for (const host of hostsAll()) stateOf(host);
 
   const connectionOf = () => Reflect.get(ctx, 'connection');
   const rejected = (req, res) => {
@@ -564,10 +583,12 @@ export function apply(ctx, config) {
       note: state.note,
       installed: state.installed,
       lastSync: state.lastSync,
+      // True when the row came from `tsh ls` rather than the config file.
+      discovered: host.discovered === true,
     };
   };
 
-  const hostById = (id) => settings.hosts.find((host) => host.id === id);
+  const hostById = (id) => hostsAll().find((host) => host.id === id);
 
   // The panel polls the list route every few seconds, so re-read the profile
   // layer there: our own row was only read once, at activation, and editing
@@ -636,14 +657,87 @@ export function apply(ctx, config) {
     } catch {
       return;
     }
-    const live = new Set(next.hosts.map((host) => host.id));
+    const live = new Set([...next.hosts, ...discovered].map((host) => host.id));
     for (const [id, state] of states) {
       if (live.has(id)) continue;
       stopForward(state);
       states.delete(id);
     }
     settings = next;
-    for (const host of next.hosts) stateOf(host);
+    for (const host of hostsAll()) stateOf(host);
+  };
+
+  const globMatch = (name, pattern) => {
+    if (!pattern.includes('*')) return name.includes(pattern);
+    const source = pattern
+      .split('*')
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+      .join('.*');
+    return new RegExp(`^${source}$`).test(name);
+  };
+  const matchesAny = (name, patterns) => patterns.length === 0 || patterns.some((p) => globMatch(name, p));
+
+  // Replace the discovered set wholesale: a machine that leaves the cluster has
+  // to leave the panel too, and its tunnel has to be dropped.
+  const publishDiscovered = (nodes) => {
+    const listed = new Set(settings.hosts.map((host) => host.target));
+    const next = nodes
+      .filter((node) => !listed.has(node.hostname))
+      .sort((a, b) => a.hostname.localeCompare(b.hostname))
+      .map((node, index) => ({
+        id: node.hostname,
+        label: node.hostname,
+        target: node.hostname,
+        login: settings.discover.login,
+        remotePort: 60727,
+        localPort: 60728 + index,
+        transport: 'tsh',
+        discovered: true,
+      }));
+    assignPorts([...settings.hosts, ...next], [], pinnedPorts);
+    const live = new Set([...settings.hosts, ...next].map((host) => host.id));
+    for (const [id, state] of states) {
+      if (live.has(id)) continue;
+      stopForward(state);
+      states.delete(id);
+    }
+    discovered = next;
+    for (const host of next) stateOf(host);
+  };
+
+  let discoveredAt = 0;
+  let discovering = false;
+  const discoverHosts = async () => {
+    const options = settings.discover;
+    if (!options.enabled || discovering) return;
+    if (Date.now() - discoveredAt < options.ttlMs) return;
+    discovering = true;
+    try {
+      const result = await run(settings.tsh, ['ls', '--format=json'], 10000);
+      // An expired login or an unreachable proxy must not empty the panel.
+      if (result.code !== 0) return;
+      let document;
+      try {
+        document = JSON.parse(result.stdout);
+      } catch {
+        return;
+      }
+      if (!Array.isArray(document)) return;
+      const nodes = [];
+      for (const item of document) {
+        const hostname = item?.spec?.hostname;
+        if (typeof hostname !== 'string' || !hostname) continue;
+        const cluster = item?.metadata?.labels?.cluster;
+        if (options.clusters.length > 0 && !options.clusters.includes(cluster)) continue;
+        if (!matchesAny(hostname, options.match)) continue;
+        if (options.exclude.some((pattern) => hostname.includes(pattern))) continue;
+        nodes.push({ hostname, cluster });
+      }
+      publishDiscovered(nodes);
+    } finally {
+      discoveredAt = Date.now();
+      discovering = false;
+    }
   };
 
   ctx.effect(
@@ -660,7 +754,8 @@ export function apply(ctx, config) {
             return;
           }
           await refreshFromDisk();
-          sendJson(res, 200, { ok: true, hosts: settings.hosts.map(describe) });
+          await discoverHosts();
+          sendJson(res, 200, { ok: true, hosts: hostsAll().map(describe) });
         },
       }),
     'remote-hosts: list route',
@@ -681,6 +776,7 @@ export function apply(ctx, config) {
           }
           const body = await readJsonBody(req);
           await refreshFromDisk();
+          await discoverHosts();
           const host = hostById(body?.id);
           if (!host) {
             sendJson(res, 404, { ok: false, message: 'unknown host id' });
