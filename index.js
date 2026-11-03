@@ -24,6 +24,44 @@ function quote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
+// Auto-assigned ports follow list position, so inserting a host in the middle
+// would move every later one and leave open panels pointing at a dead port.
+// Ports already handed out are reserved first; only then do new hosts and
+// displaced ones take the next free number. Explicit ports always win.
+function assignPorts(hosts, rawHosts, pinned) {
+  const explicit = new Set();
+  for (const raw of Array.isArray(rawHosts) ? rawHosts : []) {
+    if (raw && typeof raw.id === 'string' && Number.isInteger(raw.localPort)) explicit.add(raw.id);
+  }
+  const used = new Set();
+  const pending = [];
+  // Explicit ports are claimed first so nothing can steal them, then ports
+  // handed out earlier are re-claimed by id rather than by position.
+  for (const host of hosts) {
+    if (!explicit.has(host.id)) continue;
+    used.add(host.localPort);
+    pinned.set(host.id, host.localPort);
+  }
+  for (const host of hosts) {
+    if (explicit.has(host.id)) continue;
+    const kept = pinned.get(host.id);
+    if (kept !== undefined && !used.has(kept)) {
+      host.localPort = kept;
+      used.add(kept);
+    } else {
+      pending.push(host);
+    }
+  }
+  for (const host of pending) {
+    let port = host.localPort;
+    while (used.has(port)) port += 1;
+    host.localPort = port;
+    pinned.set(host.id, port);
+    used.add(port);
+  }
+  return hosts;
+}
+
 function normalizeConfig(config) {
   const c = config ?? {};
   const transport = c.transport === 'ssh' ? 'ssh' : 'tsh';
@@ -102,7 +140,9 @@ async function readJsonBody(req) {
 }
 
 export function apply(ctx, config) {
-  const settings = normalizeConfig(config);
+  const pinnedPorts = new Map();
+  let settings = normalizeConfig(config);
+  assignPorts(settings.hosts, config?.hosts, pinnedPorts);
   const states = new Map();
 
   const stateOf = (host) => {
@@ -529,12 +569,89 @@ export function apply(ctx, config) {
 
   const hostById = (id) => settings.hosts.find((host) => host.id === id);
 
+  // The panel polls the list route every few seconds, so re-read the profile
+  // layer there: our own row was only read once, at activation, and editing
+  // cordis.patch.yml otherwise means restarting the whole app to see a new host.
+  let yamlParse;
+  const yamlParser = async () => {
+    if (yamlParse !== undefined) return yamlParse;
+    try {
+      yamlParse = (await import('yaml')).parse;
+    } catch {
+      yamlParse = null;
+    }
+    return yamlParse;
+  };
+
+  const patchFile = () => {
+    const dir = process.env.DSH_PROFILE_DIR
+      ?? (process.env.DSH_PROFILE ? join(homedir(), '.dsh', 'profiles', process.env.DSH_PROFILE) : undefined);
+    return dir ? join(dir, 'cordis.patch.yml') : undefined;
+  };
+
+  // Entries may sit at the top level or inside another entry's `insert` list.
+  const remoteHostsRow = (document) => {
+    let found;
+    const visit = (entries) => {
+      if (!Array.isArray(entries)) return;
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (entry.id === 'remote-hosts') found = entry;
+        else if (Array.isArray(entry.insert)) visit(entry.insert);
+      }
+    };
+    visit(document);
+    return found;
+  };
+
+  let lastPatchText;
+  const refreshFromDisk = async () => {
+    const file = patchFile();
+    if (!file) return;
+    let text;
+    try {
+      text = await readFile(file, 'utf8');
+    } catch {
+      return;
+    }
+    // Concurrency and unchanged files both bail out here: only a real edit
+    // re-reads the document, so polling stays one stat-free string compare.
+    if (text === lastPatchText) return;
+    lastPatchText = text;
+    const parse = await yamlParser();
+    if (!parse) return;
+    let row;
+    try {
+      row = remoteHostsRow(parse(text));
+    } catch {
+      return;
+    }
+    if (!row || typeof row.config !== 'object' || row.config === null) return;
+    // Any failure past this point would leave the panel without our config, so
+    // an unreadable document keeps the settings already in effect.
+    let next;
+    try {
+      next = normalizeConfig(row.config);
+      assignPorts(next.hosts, row.config.hosts, pinnedPorts);
+    } catch {
+      return;
+    }
+    const live = new Set(next.hosts.map((host) => host.id));
+    for (const [id, state] of states) {
+      if (live.has(id)) continue;
+      stopForward(state);
+      states.delete(id);
+    }
+    settings = next;
+    for (const host of next.hosts) stateOf(host);
+  };
+
   ctx.effect(
     () =>
       ctx.webServer.register({
         kind: 'exact',
         path: `${API}/list`,
-        handler: (req, res) => {
+        handler: async (req, res) => {
           if (rejected(req, res)) return;
           if (req.method !== 'GET') {
             res.statusCode = 405;
@@ -542,6 +659,7 @@ export function apply(ctx, config) {
             res.end();
             return;
           }
+          await refreshFromDisk();
           sendJson(res, 200, { ok: true, hosts: settings.hosts.map(describe) });
         },
       }),
@@ -562,6 +680,7 @@ export function apply(ctx, config) {
             return;
           }
           const body = await readJsonBody(req);
+          await refreshFromDisk();
           const host = hostById(body?.id);
           if (!host) {
             sendJson(res, 404, { ok: false, message: 'unknown host id' });
