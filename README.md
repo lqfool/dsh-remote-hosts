@@ -69,6 +69,17 @@ exec /user/<账户>/.local/bin/dsh "$@"   # 没有就用 PATH 里的 dsh
 
 前提是远端有 `node` 和 `npm`（没有的话会明确报错，不会静默失败）。需要哪些包的安装脚本能跑，用 `install.allowScripts` 控制——不跑这些脚本，终端和子进程这类原生模块会缺，远端 GUI 起来也干不了活。
 
+**Node 放在账户目录下也能被认出来。** 插件和生成的启动器都会把 `<账户目录>/.local/node/bin` 和 `<账户目录>/.local/bin` 放在 PATH 最前面，所以不需要往 `/usr/local/bin` 做系统级链接。远端没有 Node 时，手动装一份到那里即可：
+
+```bash
+mkdir -p /user/<账户>/.local/node
+curl -o /tmp/node.tgz https://<可用的 node 镜像>/v22.x.x/node-v22.x.x-linux-x64.tar.gz
+tar -xzf /tmp/node.tgz -C /user/<账户>/.local/node --strip-components=1
+/user/<账户>/.local/node/bin/node -v
+```
+
+这样装完直接点连接就行，不用改配置。（`/user` 这类共享存储上的 `.local` 目录常常是多台机器共用的，一次装好，同目录下的其他机器也能直接用。）
+
 ```yaml
 install:
   version: latest          # 或固定成某个版本

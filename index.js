@@ -15,7 +15,7 @@ const API = '/api/remote-hosts';
 const MAX_BODY_BYTES = 8 * 1024;
 // Bumped whenever the generated launcher script changes, so an install from an
 // older build is rewritten instead of silently kept.
-const LAUNCHER_REVISION = 2;
+const LAUNCHER_REVISION = 3;
 
 /** Cordis function-plugin name. */
 export const name = 'remote-hosts';
@@ -322,6 +322,10 @@ export function apply(ctx, config) {
       // login user's home (root), and every session then opens at /root instead
       // of the account directory the panel is meant to work in.
       `export DSH_HOME=${quote(`${home}/.dsh`)}`,
+      // Node installed next to the account (or installed here by the panel) is
+      // not on a login shell's PATH, so put it first instead of demanding a
+      // system-wide symlink.
+      `export PATH=${quote(`${home}/.local/node/bin:${home}/.local/bin`)}:"$PATH"`,
       'set -a',
       // The env file only exists after a sync; a missing one must not abort.
       `[ -f ${quote(`${home}/.dsh/env`)} ] && . ${quote(`${home}/.dsh/env`)}`,
@@ -477,6 +481,10 @@ export function apply(ctx, config) {
   const isInstalled = async (host, state) => {
     if (state.installed !== undefined) return state.installed;
     const script = [
+      // A node unpacked under the account keeps npm reachable even when the
+      // machine has no system install; without this the probe would report
+      // "npm missing" for a host that can actually install.
+      `export PATH=${quote(`${state.home}/.local/node/bin:${state.home}/.local/bin`)}:"$PATH"`,
       `if [ -x ${quote(`${state.home}/.local/bin/dsh`)} ]; then echo "INSTALLED=1"; else echo "INSTALLED=0"; fi`,
       'echo "NODE=$(command -v node || echo -)"',
       'echo "NPM=$(command -v npm || echo -)"',
@@ -505,6 +513,7 @@ export function apply(ctx, config) {
     const scripts = install.allowScripts.length > 0 ? `--allow-scripts=${install.allowScripts.join(',')}` : '';
     const script = [
       'set -e',
+      `export PATH=${quote(`${home}/.local/node/bin:${home}/.local/bin`)}:"$PATH"`,
       `export npm_config_prefix=${quote(`${home}/.local`)}`,
       `export npm_config_cache=${quote(`${home}/.npm-cache`)}`,
       `mkdir -p ${quote(`${home}/.local`)} ${quote(`${home}/.npm-cache`)} ${quote(`${home}/.dsh`)}`,
